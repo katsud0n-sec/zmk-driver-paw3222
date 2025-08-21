@@ -1,6 +1,22 @@
-
 menuconfig PAW3222
     bool "PAW3222 mouse optical sensor"
-  select SPI
+    select SPI
     help
       Enable PAW3222 mouse optical sensor.
+if PAW3222
+
+config PAW3222_SCROLL_TICK
+    int "PAW3222's required ticks to produce a scroll report"
+    default 20
+    help
+      Scroll tick value.
+
+config PAW3222_INVERT_SCROLL_X
+  bool "Invert the X axis of the scroll"
+  default y
+
+config PAW3222_INVERT_SCROLL_Y
+  bool "Invert the Y axis of the scroll"
+  default y
+
+endif #PAW3222
