@@ -20,6 +20,7 @@
 #include <zephyr/pm/device.h>
 #include <zephyr/pm/device_runtime.h>
 #include <zephyr/sys/util.h>
+#include <zmk/keymap.h>
 
 #include "../include/paw3222.h"
 
@@ -67,19 +68,30 @@ LOG_MODULE_REGISTER(paw32xx, CONFIG_ZMK_LOG_LEVEL);
 #define RES_MIN (16 * RES_STEP)
 #define RES_MAX (127 * RES_STEP)
 
+enum paw32xx_input_mode {
+    MOVE,
+    SCROLL,
+    SNIPE,
+};
+
 struct paw32xx_config {
     struct spi_dt_spec spi;
     struct gpio_dt_spec irq_gpio;
     struct gpio_dt_spec power_gpio;
     int16_t res_cpi;
     bool force_awake;
+    int32_t *scroll_layers;
+    size_t scroll_layers_len;
 };
 
 struct paw32xx_data {
     const struct device *dev;
     struct k_work motion_work;
     struct gpio_callback motion_cb;
-    struct k_timer motion_timer; // Add timer for delayed motion checking
+    struct k_timer motion_timer;
+    enum paw32xx_input_mode curr_mode;
+    int16_t scroll_delta_x;
+    int16_t scroll_delta_y;
 };
 
 static inline int32_t sign_extend(uint32_t value, uint8_t index) {
@@ -202,6 +214,17 @@ static int paw32xx_read_xy(const struct device *dev, int16_t *x, int16_t *y) {
     return 0;
 }
 
+static enum paw32xx_input_mode get_input_mode_for_current_layer(const struct device *dev) {
+    const struct paw32xx_config *config = dev->config;
+    uint8_t curr_layer = zmk_keymap_highest_layer_active();
+    for (size_t i = 0; i < config->scroll_layers_len; i++) {
+        if (curr_layer == config->scroll_layers[i]) {
+            return SCROLL;
+        }
+    }
+    return MOVE;
+}
+
 static void paw32xx_motion_timer_handler(struct k_timer *timer) {
     struct paw32xx_data *data = CONTAINER_OF(timer, struct paw32xx_data, motion_timer);
     k_work_submit(&data->motion_work);
@@ -221,7 +244,6 @@ static void paw32xx_motion_work_handler(struct k_work *work) {
     }
 
     if ((val & MOTION_STATUS_MOTION) == 0x00) {
-        // No motion detected, re-enable interrupts and wait for next interrupt
         gpio_pin_interrupt_configure_dt(&cfg->irq_gpio, GPIO_INT_EDGE_TO_ACTIVE);
 
         if (gpio_pin_get_dt(&cfg->irq_gpio) == 0) {
@@ -235,11 +257,38 @@ static void paw32xx_motion_work_handler(struct k_work *work) {
     }
 
     LOG_DBG("x=%4d y=%4d", x, y);
+    
+    enum paw32xx_input_mode input_mode = get_input_mode_for_current_layer(dev);
+    bool input_mode_changed = data->curr_mode != input_mode;
+    data->curr_mode = input_mode;
 
-    input_report_rel(data->dev, INPUT_REL_X, x, false, K_FOREVER);
-    input_report_rel(data->dev, INPUT_REL_Y, y, true, K_FOREVER);
+    if (input_mode == MOVE) {
+        input_report_rel(data->dev, INPUT_REL_X, x, false, K_FOREVER);
+        input_report_rel(data->dev, INPUT_REL_Y, y, true, K_FOREVER);
+        data->scroll_delta_x = 0;
+        data->scroll_delta_y = 0;
+    } else if (input_mode == SCROLL) {
+        if (input_mode_changed) {
+            data->scroll_delta_x = 0;
+            data->scroll_delta_y = 0;
+        }
 
-    // Schedule next check after 15ms without using interrupts
+        data->scroll_delta_x += x;
+        data->scroll_delta_y += y;
+
+        if (abs(data->scroll_delta_y) > CONFIG_PAW3222_SCROLL_TICK) {
+            input_report_rel(data->dev, INPUT_REL_WHEEL,
+                             data->scroll_delta_y > 0 ? 1 : -1,
+                             true, K_FOREVER);
+            data->scroll_delta_y = 0;
+        } else if (abs(data->scroll_delta_x) > CONFIG_PAW3222_SCROLL_TICK) {
+            input_report_rel(data->dev, INPUT_REL_HWHEEL,
+                             data->scroll_delta_x > 0 ? 1 : -1,
+                             true, K_FOREVER);
+            data->scroll_delta_x = 0;
+        }
+    }
+
     k_timer_start(&data->motion_timer, K_MSEC(15), K_NO_WAIT);
 }
 
@@ -249,13 +298,8 @@ static void paw32xx_motion_handler(const struct device *gpio_dev, struct gpio_ca
     const struct device *dev = data->dev;
     const struct paw32xx_config *cfg = dev->config;
 
-    // Disable interrupts while timer is active
     gpio_pin_interrupt_configure_dt(&cfg->irq_gpio, GPIO_INT_DISABLE);
-
-    // Cancel any pending timer
     k_timer_stop(&data->motion_timer);
-
-    // Process motion
     k_work_submit(&data->motion_work);
 }
 
@@ -321,14 +365,13 @@ static int paw32xx_configure(const struct device *dev) {
     int ret;
     int retry_count = 10;
 
-    // Check if the device is ready
     while (retry_count--) {
         ret = paw32xx_read_reg(dev, PAW32XX_PRODUCT_ID1, &val);
         if (ret < 0) {
             if (retry_count == 0) {
                 return ret;
             }
-            k_sleep(K_MSEC(100)); // Wait before retrying
+            k_sleep(K_MSEC(100));
             continue;
         }
 
@@ -336,13 +379,13 @@ static int paw32xx_configure(const struct device *dev) {
             LOG_ERR("Invalid product id: %02x", val);
 
             if (retry_count == 0) {
-                return -ENODEV; // Device not ready after retries
+                return -ENODEV;
             }
-            k_sleep(K_MSEC(100)); // Wait before retrying
+            k_sleep(K_MSEC(100));
             continue;
         }
         else {
-            break; // Device is ready
+            break;
         }
     }
 
@@ -373,32 +416,27 @@ static int paw32xx_init(const struct device *dev) {
     }
 
     data->dev = dev;
+    data->curr_mode = MOVE;
 
     k_work_init(&data->motion_work, paw32xx_motion_work_handler);
-    // Initialize the timer for delayed motion checks
     k_timer_init(&data->motion_timer, paw32xx_motion_timer_handler, NULL);
 
 #if DT_INST_NODE_HAS_PROP(0, power_gpios)
-    // Initialize power GPIO if defined
     if (gpio_is_ready_dt(&cfg->power_gpio)) {
-        // Configure as output but start with power OFF
         ret = gpio_pin_configure_dt(&cfg->power_gpio, GPIO_OUTPUT_INACTIVE);
         if (ret != 0) {
             LOG_ERR("Power pin configuration failed: %d", ret);
             return ret;
         }
 
-        // Wait 0.01 seconds before turning on power
         k_sleep(K_MSEC(10));
 
-        // Now turn on power
         ret = gpio_pin_set_dt(&cfg->power_gpio, 1);
         if (ret != 0) {
             LOG_ERR("Power pin set failed: %d", ret);
             return ret;
         }
 
-        // Wait for power stabilization
         k_sleep(K_MSEC(500));
     }
 #endif
@@ -451,14 +489,12 @@ static int paw32xx_pm_action(const struct device *dev, enum pm_device_action act
 
     switch (action) {
     case PM_DEVICE_ACTION_SUSPEND:
-        // Disable IRQ interrupt
         ret = gpio_pin_interrupt_configure_dt(&cfg->irq_gpio, GPIO_INT_DISABLE);
         if (ret < 0) {
             LOG_ERR("Failed to disable IRQ interrupt: %d", ret);
             return ret;
         }
 
-        // Disconnect IRQ GPIO
         ret = gpio_pin_configure_dt(&cfg->irq_gpio, GPIO_DISCONNECTED);
         if (ret < 0) {
             LOG_ERR("Failed to disconnect IRQ GPIO: %d", ret);
@@ -490,7 +526,6 @@ static int paw32xx_pm_action(const struct device *dev, enum pm_device_action act
                 LOG_ERR("Failed to enable power: %d", ret);
                 return ret;
             }
-            // Wait for power stabilization
             k_sleep(K_MSEC(10));
         }
 #endif
@@ -501,14 +536,12 @@ static int paw32xx_pm_action(const struct device *dev, enum pm_device_action act
             return ret;
         }
 
-        // Reconfigure IRQ GPIO as input
         ret = gpio_pin_configure_dt(&cfg->irq_gpio, GPIO_INPUT);
         if (ret < 0) {
             LOG_ERR("Failed to configure IRQ GPIO: %d", ret);
             return ret;
         }
 
-        // Re-enable IRQ interrupt
         ret = gpio_pin_interrupt_configure_dt(&cfg->irq_gpio, GPIO_INT_EDGE_TO_ACTIVE);
         if (ret < 0) {
             LOG_ERR("Failed to enable IRQ interrupt: %d", ret);
@@ -531,12 +564,15 @@ static int paw32xx_pm_action(const struct device *dev, enum pm_device_action act
     BUILD_ASSERT(IN_RANGE(DT_INST_PROP_OR(n, res_cpi, RES_MIN), RES_MIN, RES_MAX),                 \
                  "invalid res-cpi");                                                               \
                                                                                                    \
+    static int32_t scroll_layers_##n[] = DT_PROP(DT_DRV_INST(n), scroll_layers);                    \
     static const struct paw32xx_config paw32xx_cfg_##n = {                                         \
         .spi = SPI_DT_SPEC_INST_GET(n, PAW32XX_SPI_MODE, 0),                                       \
         .irq_gpio = GPIO_DT_SPEC_INST_GET(n, irq_gpios),                                           \
         .power_gpio = GPIO_DT_SPEC_INST_GET_OR(n, power_gpios, {0}),                               \
         .res_cpi = DT_INST_PROP_OR(n, res_cpi, -1),                                                \
         .force_awake = DT_INST_PROP(n, force_awake),                                               \
+        .scroll_layers = scroll_layers_##n,                                                        \
+        .scroll_layers_len = DT_PROP_LEN(DT_DRV_INST(n), scroll_layers),                           \
     };                                                                                             \
                                                                                                    \
     static struct paw32xx_data paw32xx_data_##n;                                                   \
