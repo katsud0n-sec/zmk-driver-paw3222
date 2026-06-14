@@ -96,7 +96,6 @@ struct paw32xx_data {
     struct k_work motion_work;
     struct gpio_callback motion_cb;
     struct k_timer motion_timer; // Add timer for delayed motion checking
-    struct k_timer motion_timer;
     enum paw32xx_input_mode curr_mode;
     int16_t scroll_delta_x;
     int16_t scroll_delta_y;
