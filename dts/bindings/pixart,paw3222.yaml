@@ -37,32 +37,3 @@ properties:
   scroll-layers:
     type: array
     default: []
-
-  snipe-layers:
-    type: array
-    required: false
-    default: []
-    description: |
-      List of layer numbers to switch between using the snipe-layers feature.
-
-  snipe-divisor:
-    type: int
-    required: false
-    default: 2
-    description: |
-      Divisor for snipe mode sensitivity. Movement values are divided
-      by this factor for ultra-precision. Higher values = lower sensitivity.
-
-  slow-scroll-layers:
-    type: array
-    required: false
-    default: []
-    description: |
-      List of layer numbers to use slow scroll tick.
-
-  slow-scroll-tick:
-    type: int
-    required: false
-    default: 40
-    description: |
-      Scroll tick for slow scroll layers. Higher values = lower sensitivity.
