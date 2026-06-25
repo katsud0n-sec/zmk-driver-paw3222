@@ -319,19 +319,18 @@ static void paw32xx_motion_work_handler(struct k_work *work) {
         data->scroll_delta_x += x;
         data->scroll_delta_y += y;
 
-        uint8_t scroll_tick;
-        scroll_tick = CONFIG_PAW3222_SCROLL_TICK;
+        uint8_t scroll_tick = CONFIG_PAW3222_SCROLL_TICK;
 
-        if (abs(data->scroll_delta_y) > scroll_tick) {
-            input_report_rel(data->dev, INPUT_REL_WHEEL,
-                             data->scroll_delta_y > 0 ? 1 : -1,
-                             true, K_FOREVER);
-            data->scroll_delta_y = 0;
-        } else if (abs(data->scroll_delta_x) > scroll_tick) {
-            input_report_rel(data->dev, INPUT_REL_HWHEEL,
-                             data->scroll_delta_x > 0 ? 1 : -1,
-                             true, K_FOREVER);
-            data->scroll_delta_x = 0;
+        int steps_y = data->scroll_delta_y / scroll_tick;
+        if (steps_y != 0) {
+            input_report_rel(data->dev, INPUT_REL_WHEEL, steps_y, true, K_FOREVER);
+            data->scroll_delta_y %= scroll_tick;
+        }
+
+        int steps_x = data->scroll_delta_x / scroll_tick;
+        if (steps_x != 0) {
+            input_report_rel(data->dev, INPUT_REL_HWHEEL, steps_x, true, K_FOREVER);
+            data->scroll_delta_x %= scroll_tick;
         }
     }
 
