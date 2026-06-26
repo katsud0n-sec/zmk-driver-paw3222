@@ -8,7 +8,7 @@ if PAW3222
 
 config PAW3222_SCROLL_TICK
     int "PAW3222's required ticks to produce a scroll report"
-    default 10
+    default 5
     help
       Scroll tick value.
 
